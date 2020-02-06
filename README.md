@@ -1,139 +1,162 @@
-pvlib-python
-============
+<img src="docs/sphinx/source/_images/pvlib_logo_horiz.png" width="600">
 
-[![TravisCI](https://travis-ci.org/pvlib/pvlib-python.svg?branch=master)](https://travis-ci.org/pvlib/pvlib-python)
-[![Coverage Status](https://img.shields.io/coveralls/pvlib/pvlib-python.svg)](https://coveralls.io/r/pvlib/pvlib-python)
-[![Documentation Status](https://readthedocs.org/projects/pvlib-python/badge/?version=latest)](http://pvlib-python.readthedocs.org/en/latest/)
+<table>
+<tr>
+  <td>Latest Release</td>
+  <td>
+    <a href="https://pypi.org/project/pvlib/">
+    <img src="https://img.shields.io/pypi/v/pvlib.svg" alt="latest release" />
+    </a>
+    <a href="https://anaconda.org/conda-forge/pvlib-python">
+    <img src="https://anaconda.org/conda-forge/pvlib-python/badges/version.svg" />
+    </a>
+    <a href="https://anaconda.org/conda-forge/pvlib-python">
+    <img src="https://anaconda.org/conda-forge/pvlib-python/badges/latest_release_date.svg" />
+    </a>
+</tr>
+<tr>
+  <td>License</td>
+  <td>
+    <a href="https://github.com/pvlib/pvlib-python/blob/master/LICENSE">
+    <img src="https://img.shields.io/pypi/l/pvlib.svg" alt="license" />
+    </a>
+</td>
+</tr>
+<tr>
+  <td>Build Status</td>
+  <td>
+    <a href="https://travis-ci.org/pvlib/pvlib-python">
+    <img src="https://travis-ci.org/pvlib/pvlib-python.svg?branch=master" alt="travis build status" />
+    </a>
+    <a href="http://pvlib-python.readthedocs.org/en/stable/">
+    <img src="https://readthedocs.org/projects/pvlib-python/badge/?version=stable" alt="documentation build status" />
+    </a>
+    <a href="https://dev.azure.com/solararbiter/pvlib%20python/_build/latest?definitionId=4&branchName=master">
+      <img src="https://dev.azure.com/solararbiter/pvlib%20python/_apis/build/status/pvlib.pvlib-python?branchName=master" alt="Azure Pipelines build status" />
+    </a>
+  </td>
+</tr>
+<tr>
+  <td>Code Quality</td>
+  <td>
+    <a href="https://lgtm.com/projects/g/pvlib/pvlib-python/context:python">
+    <img src="https://img.shields.io/lgtm/grade/python/g/pvlib/pvlib-python.svg?logo=lgtm&logoWidth=18" alt="lgtm quality grade" />
+    </a>
+    <a href="https://lgtm.com/projects/g/pvlib/pvlib-python/alerts">
+    <img src="https://img.shields.io/lgtm/alerts/g/pvlib/pvlib-python.svg?logo=lgtm&logoWidth=18" alt="lgtm alters" />
+    </a>
+  </td>
+</tr>
+<tr>
+  <td>Coverage</td>
+  <td>
+    <a href="https://coveralls.io/r/pvlib/pvlib-python">
+    <img src="https://img.shields.io/coveralls/pvlib/pvlib-python.svg" alt="coveralls coverage" />
+    </a>
+    <a href="https://codecov.io/gh/pvlib/pvlib-python">
+    <img src="https://codecov.io/gh/pvlib/pvlib-python/branch/master/graph/badge.svg" alt="codecov coverage" />
+    </a>
+  </td>
+</tr>
+<tr>
+  <td>Publications</td>
+  <td>
+    <a href="https://doi.org/10.5281/zenodo.2554311">
+    <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.2554311.svg" alt="zenodo reference" />
+    </a>
+    <a href="http://joss.theoj.org/papers/41187535cad22dd4b076c89b72f874b1">
+    <img src="http://joss.theoj.org/papers/41187535cad22dd4b076c89b72f874b1/status.svg" alt="JOSS reference" />
+    </a>
+  </td>
+</tr>
+<tr>
+  <td>Downloads</td>
+  <td>
+    <a href="https://pypi.org/project/pvlib/">
+    <img src="https://img.shields.io/pypi/dm/pvlib" alt="PyPI downloads" />
+    </a>
+    <a href="https://anaconda.org/conda-forge/pvlib-python">
+    <img src="https://anaconda.org/conda-forge/pvlib-python/badges/downloads.svg" alt="conda-forge downloads" />
+    </a>
+  </td>
+</tr>
+</table>
 
 
-pvlib-python provides a set of documented functions for simulating the performance of photovoltaic energy systems. The toolbox was originally developed in MATLAB at Sandia National Laboratories and it implements many of the models and methods developed at the Labs. More information on Sandia Labs PV performance modelling programs can be found at https://pvpmc.sandia.gov/. 
+pvlib python is a community supported tool that provides a set of
+functions and classes for simulating the performance of photovoltaic
+energy systems. pvlib python was originally ported from the PVLIB MATLAB
+toolbox developed at Sandia National Laboratories and it implements many
+of the models and methods developed at the Labs. More information on
+Sandia Labs PV performance modeling programs can be found at
+https://pvpmc.sandia.gov/. We collaborate with the PVLIB MATLAB project,
+but operate independently of it.
+
 
 Documentation
 =============
 
-Full documentation can be found at [readthedocs](http://pvlib-python.readthedocs.org/en/latest/).
+Full documentation can be found at [readthedocs](http://pvlib-python.readthedocs.io/en/stable/).
 
-Development
-===========
-
-We need your help to make pvlib-python a great tool! Please see the [Development information wiki](https://github.com/pvlib/pvlib-python/wiki/Development-information) for more on how you can contribute.
-
-Quick Start
-===========
 
 Installation
-------------
-To obtain the most recent stable release, just use ``pip``:
+============
 
-```
-pip install pvlib-python
-```
+pvlib-python releases may be installed using the ``pip`` and ``conda`` tools.
+Please see the [Installation page](http://pvlib-python.readthedocs.io/en/stable/installation.html) of the documentation for complete instructions.
 
-We strongly recommend working in a *virtual environment* (see the wiki or Google for more information). To install the latest development versions, run
+pvlib-python is compatible with Python 3.5 and above.
 
-```
-pip install git+https://github.com/pvlib/pvlib-python.git
-```
-
-Alternatively, ``git clone`` this repository, ``cd`` into it, and run
-
-```
-pip install .
-```
-
-Add ``-e`` to install in [develop mode](http://pip.readthedocs.org/en/latest/reference/pip_install.html#editable-installs).
-
-To use the NREL SPA algorithm, a pip install from the web cannot be used. Instead: 
-
-1. Download the pvlib repository from https://github.com/pvlib/pvlib-python.git
-2. Download the SPA files from [NREL](http://www.nrel.gov/midc/spa/)
-3. Copy the SPA files into ``pvlib-python/pvlib/spa_c_files`` 
-4. From the ``pvlib-python`` directory, run ``pip uninstall pvlib`` followed by ``pip install . ``
+**Python 2.7 support ended on June 1, 2019, with pvlib-python 0.6.3.**
 
 
-Usage Example
--------------
-```
-# built-in imports
-import sys
-import datetime
+Contributing
+============
 
-# add-on imports
-import pandas as pd
-
-# pvlib imports
-from pvlib.location import Location
-import pvlib.solarposition
-import pvlib.clearsky
-
-# make a location
-tus = Location(32.2, -111, 'MST', 700)
-
-# make a pandas DatetimeIndex for some day
-times = pd.date_range(start=datetime.datetime(2014,6,24), end=datetime.datetime(2014,6,25), freq='1Min')
-
-# calculate the solar position
-solpos = pvlib.solarposition.get_solarposition(times, tus, method='pyephem')
-solpos.plot()
-
-# calculate clear sky data
-tus_cs = pvlib.clearsky.ineichen(times, tus, airmass_model='young1994')
-tus_cs.plot()
-```
+We need your help to make pvlib-python a great tool!
+Please see the [Contributing page](http://pvlib-python.readthedocs.io/en/stable/contributing.html) for more on how you can contribute.
+The long-term success of pvlib-python requires substantial community support.
 
 
 License
 =======
-3 clause BSD.
+
+BSD 3-clause
 
 
-Compatibility
-=============
+Getting support
+===============
 
-pvlib-python is compatible with Python versions 2.7, 3.3, and 3.4, and pandas versions 0.13.1 through 0.16.2.
+pvlib usage questions can be asked on
+[Stack Overflow](http://stackoverflow.com) and tagged with
+the [pvlib](http://stackoverflow.com/questions/tagged/pvlib) tag.
+
+The [pvlib-python google group](https://groups.google.com/forum/#!forum/pvlib-python)
+is used for discussing various topics of interest to the pvlib-python
+community. We also make new version announcements on the google group.
+
+If you suspect that you may have discovered a bug or if you'd like to
+change something about pvlib, then please make an issue on our
+[GitHub issues page](https://github.com/pvlib/pvlib-python/issues).
 
 
-Testing
-=======
-Testing can easily be accomplished by running ``nosetests`` on the pvlib directory:
-```
-nosetests -v pvlib
-```
-Unit test code should be placed in the corresponding test module in the pvlib/test directory. Use ``pip`` or ``conda`` to install ``nose``. Developers must include comprehensive tests for any additions or modifications to pvlib.
+Citing
+======
 
+If you use pvlib-python in a published work, please cite:
 
-Code Transition
-================
-Here are some of the major differences between the latest build and the original  Sandia PVLIB\_Python project. 
+  William F. Holmgren, Clifford W. Hansen, and Mark A. Mikofski.
+  "pvlib python: a python package for modeling solar energy systems."
+  Journal of Open Source Software, 3(29), 884, (2018).
+  https://doi.org/10.21105/joss.00884
 
-Library wide changes:
-* Remove ``pvl_`` from module names.
-* Consolidation of similar modules. For example, functions from ``pvl_clearsky_ineichen.py`` and ``pvl_clearsky_haurwitz.py`` have been consolidated into ``clearsky.py``. 
-* Removed ``Vars=Locals(); Expect...; var=pvl\_tools.Parse(Vars,Expect);`` pattern. Very few tests of input validitity remain. Garbage in, garbage or ``nan`` out.
-* Removing unnecssary and sometimes undesired behavior such as setting maximum zenith=90 or airmass=0. Instead, we make extensive use of ``nan`` values.
-* Adding logging calls, removing print calls.
-* Code in reviewed modules is mostly PEP8 compliant.
-* All code is Python 3 compatible (see testing).
-* Changing function and module names so that they do not conflict.
-* Added ``/pvlib/data`` for lookup tables, test, and tutorial data.
-* Return one DataFrame instead of a tuple of DataFrames.
+Please also cite the DOI corresponding to the specific version of
+pvlib-python that you used. pvlib-python DOIs are listed at
+[Zenodo.org](https://zenodo.org/search?page=1&size=20&q=conceptrecid:593284&all_versions&sort=-version)
 
-More specific changes:
-* Add PyEphem option to solar position calculations. 
-* ``irradiance.py`` has more AOI, projection, and irradiance sum and calculation functions
-* TMY data is not forced to 1987.
-* Locations are now ``pvlib.location.Location`` objects, not structs.
-* Specify time zones using a string from the standard IANA Time Zone Database naming conventions or using a pytz.timezone instead of an integer GMT offset. We may add dateutils support in the future.
-* ``clearsky.ineichen`` supports interpolating monthly Linke Turbidities to daily resolution.
+NumFOCUS
+========
 
-Documentation:
-* Using readthedocs for documentation hosting.
-* Many typos and formatting errors corrected.
-* Documentation source code and tutorials live in ``/`` rather than ``/pvlib/docs``.
-* Additional tutorials in ``/docs/tutorials``.
+pvlib python is a [NumFOCUS Affiliated Project](https://numfocus.org/sponsored-projects/affiliated-projects)
 
-Testing:
-* Tests are cleaner and more thorough. They are still no where near complete.
-* Using Coveralls to measure test coverage. 
-* Using TravisCI for automated testing.
-* Using ``nosetests`` for more concise test code. 
+[![NumFocus Affliated Projects](https://i0.wp.com/numfocus.org/wp-content/uploads/2019/06/AffiliatedProject.png)](https://numfocus.org/sponsored-projects/affiliated-projects)

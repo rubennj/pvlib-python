@@ -1,884 +1,922 @@
 """
-The ``clearsky`` module contains several methods 
+The ``clearsky`` module contains several methods
 to calculate clear sky GHI, DNI, and DHI.
 """
 
-from __future__ import division
-
-import logging
-logger = logging.getLogger('pvlib')
-
 import os
+from collections import OrderedDict
+import calendar
 
 import numpy as np
 import pandas as pd
 
-from pvlib import tools
-from pvlib import irradiance
-from pvlib import atmosphere
-from pvlib import solarposition
+from pvlib import atmosphere, tools
 
 
-
-def ineichen(time, location, linke_turbidity=None, 
-             solarposition_method='pyephem', zenith_data=None,
-             airmass_model='young1994', airmass_data=None,
-             interp_turbidity=True):
+def ineichen(apparent_zenith, airmass_absolute, linke_turbidity,
+             altitude=0, dni_extra=1364., perez_enhancement=False):
     '''
-    Determine clear sky GHI, DNI, and DHI from Ineichen/Perez model
+    Determine clear sky GHI, DNI, and DHI from Ineichen/Perez model.
 
-    Implements the Ineichen and Perez clear sky model for global horizontal
-    irradiance (GHI), direct normal irradiance (DNI), and calculates
-    the clear-sky diffuse horizontal (DHI) component as the difference
-    between GHI and DNI*cos(zenith) as presented in [1, 2]. A report on clear
-    sky models found the Ineichen/Perez model to have excellent performance
-    with a minimal input data set [3]. 
-    
-    Default values for montly Linke turbidity provided by SoDa [4, 5].
+    Implements the Ineichen and Perez clear sky model for global
+    horizontal irradiance (GHI), direct normal irradiance (DNI), and
+    calculates the clear-sky diffuse horizontal (DHI) component as the
+    difference between GHI and DNI*cos(zenith) as presented in [1, 2]. A
+    report on clear sky models found the Ineichen/Perez model to have
+    excellent performance with a minimal input data set [3].
+
+    Default values for monthly Linke turbidity provided by SoDa [4, 5].
 
     Parameters
     -----------
-    time : pandas.DatetimeIndex
-    
-    location : pvlib.Location
-    
-    linke_turbidity : None or float
-        If None, uses ``LinkeTurbidities.mat`` lookup table.
-    
-    solarposition_method : string
-        Sets the solar position algorithm. 
-        See solarposition.get_solarposition()
-    
-    zenith_data : None or pandas.Series
-        If None, ephemeris data will be calculated using ``solarposition_method``.
-    
-    airmass_model : string
-        See pvlib.airmass.relativeairmass().
-    
-    airmass_data : None or pandas.Series
-        If None, absolute air mass data will be calculated using 
-        ``airmass_model`` and location.alitude.
-    
-    interp_turbidity : bool
-        If ``True``, interpolates the monthly Linke turbidity values
-        found in ``LinkeTurbidities.mat`` to daily values.
+    apparent_zenith : numeric
+        Refraction corrected solar zenith angle in degrees.
+
+    airmass_absolute : numeric
+        Pressure corrected airmass.
+
+    linke_turbidity : numeric
+        Linke Turbidity.
+
+    altitude : numeric, default 0
+        Altitude above sea level in meters.
+
+    dni_extra : numeric, default 1364
+        Extraterrestrial irradiance. The units of ``dni_extra``
+        determine the units of the output.
+
+    perez_enhancement : bool, default False
+        Controls if the Perez enhancement factor should be applied.
+        Setting to True may produce spurious results for times when
+        the Sun is near the horizon and the airmass is high.
+        See https://github.com/pvlib/pvlib-python/issues/435
 
     Returns
-    --------
-    DataFrame with the following columns: ``GHI, DNI, DHI``.
+    -------
+    clearsky : DataFrame (if Series input) or OrderedDict of arrays
+        DataFrame/OrderedDict contains the columns/keys
+        ``'dhi', 'dni', 'ghi'``.
 
-    Notes
-    -----
-    If you are using this function
-    in a loop, it may be faster to load LinkeTurbidities.mat outside of
-    the loop and feed it in as a variable, rather than
-    having the function open the file each time it is called.
+    See also
+    --------
+    lookup_linke_turbidity
+    pvlib.location.Location.get_clearsky
 
     References
     ----------
+    .. [1] P. Ineichen and R. Perez, "A New airmass independent formulation for
+       the Linke turbidity coefficient", Solar Energy, vol 73, pp. 151-157,
+       2002.
 
-    [1] P. Ineichen and R. Perez, "A New airmass independent formulation for
-        the Linke turbidity coefficient", Solar Energy, vol 73, pp. 151-157, 2002.
+    .. [2] R. Perez et. al., "A New Operational Model for Satellite-Derived
+       Irradiances: Description and Validation", Solar Energy, vol 73, pp.
+       307-317, 2002.
 
-    [2] R. Perez et. al., "A New Operational Model for Satellite-Derived
-        Irradiances: Description and Validation", Solar Energy, vol 73, pp.
-        307-317, 2002.
+    .. [3] M. Reno, C. Hansen, and J. Stein, "Global Horizontal Irradiance
+       Clear Sky Models: Implementation and Analysis", Sandia National
+       Laboratories, SAND2012-2389, 2012.
 
-    [3] M. Reno, C. Hansen, and J. Stein, "Global Horizontal Irradiance Clear
-        Sky Models: Implementation and Analysis", Sandia National
-        Laboratories, SAND2012-2389, 2012.
+    .. [4] http://www.soda-is.com/eng/services/climat_free_eng.php#c5 (obtained
+       July 17, 2012).
 
-    [4] http://www.soda-is.com/eng/services/climat_free_eng.php#c5 (obtained
-        July 17, 2012).
-
-    [5] J. Remund, et. al., "Worldwide Linke Turbidity Information", Proc.
-        ISES Solar World Congress, June 2003. Goteborg, Sweden.
+    .. [5] J. Remund, et. al., "Worldwide Linke Turbidity Information", Proc.
+       ISES Solar World Congress, June 2003. Goteborg, Sweden.
     '''
-    # Initial implementation of this algorithm by Matthew Reno.
-    # Ported to python by Rob Andrews
-    # Added functionality by Will Holmgren
-    
-    I0 = irradiance.extraradiation(time.dayofyear)
-    
-    if zenith_data is None:
-        ephem_data = solarposition.get_solarposition(time, location, 
-                                                     method=solarposition_method)
-        time = ephem_data.index # fixes issue with time possibly not being tz-aware    
-        try:
-            ApparentZenith = ephem_data['apparent_zenith']
-        except KeyError:
-            ApparentZenith = ephem_data['zenith']
-            logger.warning('could not find apparent_zenith. using zenith')
-    else:
-        ApparentZenith = zenith_data
-    #ApparentZenith[ApparentZenith >= 90] = 90 # can cause problems in edge cases
 
-    
-    if linke_turbidity is None:
-        # The .mat file 'LinkeTurbidities.mat' contains a single 2160 x 4320 x 12
-        # matrix of type uint8 called 'LinkeTurbidity'. The rows represent global
-        # latitudes from 90 to -90 degrees; the columns represent global longitudes
-        # from -180 to 180; and the depth (third dimension) represents months of
-        # the year from January (1) to December (12). To determine the Linke
-        # turbidity for a position on the Earth's surface for a given month do the
-        # following: LT = LinkeTurbidity(LatitudeIndex, LongitudeIndex, month).  
-        # Note that the numbers within the matrix are 20 * Linke Turbidity, 
-        # so divide the number from the file by 20 to get the
-        # turbidity.
-        
-        try:
-            import scipy.io
-        except ImportError:
-            raise ImportError('The Linke turbidity lookup table requires scipy. ' +
-                              'You can still use clearsky.ineichen if you ' +
-                              'supply your own turbidities.')
-        
-        # consider putting this code at module level
-        this_path = os.path.dirname(os.path.abspath(__file__))
-        logger.debug('this_path={}'.format(this_path))
-        
-        mat = scipy.io.loadmat(os.path.join(this_path, 'data', 'LinkeTurbidities.mat'))
-        linke_turbidity = mat['LinkeTurbidity']
-        LatitudeIndex = np.round_(_linearly_scale(location.latitude,90,- 90,1,2160))
-        LongitudeIndex = np.round_(_linearly_scale(location.longitude,- 180,180,1,4320))
-        g = linke_turbidity[LatitudeIndex][LongitudeIndex]
-        if interp_turbidity:
-            logger.info('interpolating turbidity to the day')
-            g2 = np.concatenate([[g[-1]], g, [g[0]]]) # wrap ends around
-            days = np.linspace(-15, 380, num=14) # map day of year onto month (approximate)
-            LT = pd.Series(np.interp(time.dayofyear, days, g2), index=time)
-        else:
-            logger.info('using monthly turbidity')
-            ApplyMonth = lambda x:g[x[0]-1]
-            LT = pd.DataFrame(time.month, index=time)
-            LT = LT.apply(ApplyMonth, axis=1)
-        TL = LT / 20.
-        logger.info('using TL=\n{}'.format(TL))
-    else:
-        TL = linke_turbidity
+    # ghi is calculated using either the equations in [1] by setting
+    # perez_enhancement=False (default behavior) or using the model
+    # in [2] by setting perez_enhancement=True.
 
-    # Get the absolute airmass assuming standard local pressure (per
-    # alt2pres) using Kasten and Young's 1989 formula for airmass.
-    
-    if airmass_data is None:
-        AMabsolute = atmosphere.absoluteairmass(AMrelative=atmosphere.relativeairmass(ApparentZenith, airmass_model),
-                                                pressure=atmosphere.alt2pres(location.altitude))
-    else:
-        AMabsolute = airmass_data
-        
-    fh1 = np.exp(-location.altitude/8000.)
-    fh2 = np.exp(-location.altitude/1250.)
-    cg1 = 5.09e-05 * location.altitude + 0.868
-    cg2 = 3.92e-05 * location.altitude + 0.0387
-    logger.debug('fh1={}, fh2={}, cg1={}, cg2={}'.format(fh1, fh2, cg1, cg2))
+    # The NaN handling is a little subtle. The AM input is likely to
+    # have NaNs that we'll want to map to 0s in the output. However, we
+    # want NaNs in other inputs to propagate through to the output. This
+    # is accomplished by judicious use and placement of np.maximum,
+    # np.minimum, and np.fmax
 
-    #  Dan's note on the TL correction: By my reading of the publication on
-    #  pages 151-157, Ineichen and Perez introduce (among other things) three
-    #  things. 1) Beam model in eqn. 8, 2) new turbidity factor in eqn 9 and
-    #  appendix A, and 3) Global horizontal model in eqn. 11. They do NOT appear
-    #  to use the new turbidity factor (item 2 above) in either the beam or GHI
-    #  models. The phrasing of appendix A seems as if there are two separate
-    #  corrections, the first correction is used to correct the beam/GHI models,
-    #  and the second correction is used to correct the revised turibidity
-    #  factor. In my estimation, there is no need to correct the turbidity
-    #  factor used in the beam/GHI models.
+    # use max so that nighttime values will result in 0s instead of
+    # negatives. propagates nans.
+    cos_zenith = np.maximum(tools.cosd(apparent_zenith), 0)
 
-    #  Create the corrected TL for TL < 2
-    #  TLcorr = TL;
-    #  TLcorr(TL < 2) = TLcorr(TL < 2) - 0.25 .* (2-TLcorr(TL < 2)) .^ (0.5);
+    tl = linke_turbidity
 
-    #  This equation is found in Solar Energy 73, pg 311. 
-    #  Full ref: Perez et. al., Vol. 73, pp. 307-317 (2002).
-    #  It is slightly different than the equation given in Solar Energy 73, pg 156. 
-    #  We used the equation from pg 311 because of the existence of known typos 
-    #  in the pg 156 publication (notably the fh2-(TL-1) should be fh2 * (TL-1)). 
-    
-    cos_zenith = tools.cosd(ApparentZenith)
-    
-    clearsky_GHI = cg1 * I0 * cos_zenith * np.exp(-cg2*AMabsolute*(fh1 + fh2*(TL - 1))) * np.exp(0.01*AMabsolute**1.8)
-    clearsky_GHI[clearsky_GHI < 0] = 0
-    
-    # BncI == "normal beam clear sky radiation"
+    fh1 = np.exp(-altitude/8000.)
+    fh2 = np.exp(-altitude/1250.)
+    cg1 = 5.09e-05 * altitude + 0.868
+    cg2 = 3.92e-05 * altitude + 0.0387
+
+    ghi = np.exp(-cg2*airmass_absolute*(fh1 + fh2*(tl - 1)))
+
+    # https://github.com/pvlib/pvlib-python/issues/435
+    if perez_enhancement:
+        ghi *= np.exp(0.01*airmass_absolute**1.8)
+
+    # use fmax to map airmass nans to 0s. multiply and divide by tl to
+    # reinsert tl nans
+    ghi = cg1 * dni_extra * cos_zenith * tl / tl * np.fmax(ghi, 0)
+
+    # From [1] (Following [2] leads to 0.664 + 0.16268 / fh1)
+    # See https://github.com/pvlib/pvlib-python/pull/808
     b = 0.664 + 0.163/fh1
-    BncI = b * I0 * np.exp( -0.09 * AMabsolute * (TL - 1) )
-    logger.debug('b={}'.format(b))
-    
+    # BncI = "normal beam clear sky radiation"
+    bnci = b * np.exp(-0.09 * airmass_absolute * (tl - 1))
+    bnci = dni_extra * np.fmax(bnci, 0)
+
     # "empirical correction" SE 73, 157 & SE 73, 312.
-    BncI_2 = clearsky_GHI * ( 1 - (0.1 - 0.2*np.exp(-TL))/(0.1 + 0.882/fh1) ) / cos_zenith
-    #return BncI, BncI_2
-    clearsky_DNI = np.minimum(BncI, BncI_2) # Will H: use np.minimum explicitly
-    
-    clearsky_DHI = clearsky_GHI - clearsky_DNI*cos_zenith
-    
-    df_out = pd.DataFrame({'GHI':clearsky_GHI, 'DNI':clearsky_DNI, 
-                           'DHI':clearsky_DHI})
-    df_out.fillna(0, inplace=True)
-    #df_out['BncI'] = BncI
-    #df_out['BncI_2'] = BncI
-    
-    return df_out
-    
-    
-    
-def haurwitz(ApparentZenith):
-    '''
-    Determine clear sky GHI from Haurwitz model
-   
-    Implements the Haurwitz clear sky model for global horizontal
-    irradiance (GHI) as presented in [1, 2]. A report on clear
-    sky models found the Haurwitz model to have the best performance of
-    models which require only zenith angle [3]. Extreme care should
-    be taken in the interpretation of this result! 
+    bnci_2 = ((1 - (0.1 - 0.2*np.exp(-tl))/(0.1 + 0.882/fh1)) /
+              cos_zenith)
+    bnci_2 = ghi * np.fmin(np.fmax(bnci_2, 0), 1e20)
+
+    dni = np.minimum(bnci, bnci_2)
+
+    dhi = ghi - dni*cos_zenith
+
+    irrads = OrderedDict()
+    irrads['ghi'] = ghi
+    irrads['dni'] = dni
+    irrads['dhi'] = dhi
+
+    if isinstance(dni, pd.Series):
+        irrads = pd.DataFrame.from_dict(irrads)
+
+    return irrads
+
+
+def lookup_linke_turbidity(time, latitude, longitude, filepath=None,
+                           interp_turbidity=True):
+    """
+    Look up the Linke Turibidity from the ``LinkeTurbidities.h5``
+    data file supplied with pvlib.
 
     Parameters
     ----------
-    ApparentZenith : DataFrame
+    time : pandas.DatetimeIndex
+
+    latitude : float or int
+
+    longitude : float or int
+
+    filepath : None or string, default None
+        The path to the ``.h5`` file.
+
+    interp_turbidity : bool, default True
+        If ``True``, interpolates the monthly Linke turbidity values
+        found in ``LinkeTurbidities.h5`` to daily values.
+
+    Returns
+    -------
+    turbidity : Series
+    """
+
+    # The .h5 file 'LinkeTurbidities.h5' contains a single 2160 x 4320 x 12
+    # matrix of type uint8 called 'LinkeTurbidity'. The rows represent global
+    # latitudes from 90 to -90 degrees; the columns represent global longitudes
+    # from -180 to 180; and the depth (third dimension) represents months of
+    # the year from January (1) to December (12). To determine the Linke
+    # turbidity for a position on the Earth's surface for a given month do the
+    # following: LT = LinkeTurbidity(LatitudeIndex, LongitudeIndex, month).
+    # Note that the numbers within the matrix are 20 * Linke Turbidity,
+    # so divide the number from the file by 20 to get the
+    # turbidity.
+
+    # The nodes of the grid are 5' (1/12=0.0833[arcdeg]) apart.
+    # From Section 8 of Aerosol optical depth and Linke turbidity climatology
+    # http://www.meteonorm.com/images/uploads/downloads/ieashc36_report_TL_AOD_climatologies.pdf
+    # 1st row: 89.9583 S, 2nd row: 89.875 S
+    # 1st column: 179.9583 W, 2nd column: 179.875 W
+
+    try:
+        import tables
+    except ImportError:
+        raise ImportError('The Linke turbidity lookup table requires tables. '
+                          'You can still use clearsky.ineichen if you '
+                          'supply your own turbidities.')
+
+    if filepath is None:
+        pvlib_path = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(pvlib_path, 'data', 'LinkeTurbidities.h5')
+
+    latitude_index = _degrees_to_index(latitude, coordinate='latitude')
+    longitude_index = _degrees_to_index(longitude, coordinate='longitude')
+
+    with tables.open_file(filepath) as lt_h5_file:
+        lts = lt_h5_file.root.LinkeTurbidity[latitude_index,
+                                             longitude_index, :]
+
+    if interp_turbidity:
+        linke_turbidity = _interpolate_turbidity(lts, time)
+    else:
+        months = time.month - 1
+        linke_turbidity = pd.Series(lts[months], index=time)
+
+    linke_turbidity /= 20.
+
+    return linke_turbidity
+
+
+def _is_leap_year(year):
+    """Determine if a year is leap year.
+
+    Parameters
+    ----------
+    year : numeric
+
+    Returns
+    -------
+    isleap : array of bools
+    """
+    isleap = ((np.mod(year, 4) == 0) &
+              ((np.mod(year, 100) != 0) | (np.mod(year, 400) == 0)))
+    return isleap
+
+
+def _interpolate_turbidity(lts, time):
+    """
+    Interpolated monthly Linke turbidity onto daily values.
+
+    Parameters
+    ----------
+    lts : np.array
+        Monthly Linke turbidity values.
+    time : pd.DatetimeIndex
+        Times to be interpolated onto.
+
+    Returns
+    -------
+    linke_turbidity : pd.Series
+        The interpolated turbidity.
+    """
+    # Data covers 1 year. Assume that data corresponds to the value at the
+    # middle of each month. This means that we need to add previous Dec and
+    # next Jan to the array so that the interpolation will work for
+    # Jan 1 - Jan 15 and Dec 16 - Dec 31.
+    lts_concat = np.concatenate([[lts[-1]], lts, [lts[0]]])
+
+    # handle leap years
+    try:
+        isleap = time.is_leap_year
+    except AttributeError:
+        year = time.year
+        isleap = _is_leap_year(year)
+
+    dayofyear = time.dayofyear
+    days_leap = _calendar_month_middles(2016)
+    days_no_leap = _calendar_month_middles(2015)
+
+    # Then we map the month value to the day of year value.
+    # Do it for both leap and non-leap years.
+    lt_leap = np.interp(dayofyear, days_leap, lts_concat)
+    lt_no_leap = np.interp(dayofyear, days_no_leap, lts_concat)
+    linke_turbidity = np.where(isleap, lt_leap, lt_no_leap)
+
+    linke_turbidity = pd.Series(linke_turbidity, index=time)
+
+    return linke_turbidity
+
+
+def _calendar_month_middles(year):
+    """List of middle day of each month, used by Linke turbidity lookup"""
+    # remove mdays[0] since January starts at mdays[1]
+    # make local copy of mdays since we need to change
+    # February for leap years
+    mdays = np.array(calendar.mdays[1:])
+    ydays = 365
+    # handle leap years
+    if calendar.isleap(year):
+        mdays[1] = mdays[1] + 1
+        ydays = 366
+    middles = np.concatenate(
+        [[-calendar.mdays[-1] / 2.0],  # Dec last year
+         np.cumsum(mdays) - np.array(mdays) / 2.,  # this year
+         [ydays + calendar.mdays[1] / 2.0]])  # Jan next year
+    return middles
+
+
+def _degrees_to_index(degrees, coordinate):
+    """Transform input degrees to an output index integer. The Linke
+    turbidity lookup tables have three dimensions, latitude, longitude, and
+    month. Specify a degree value and either 'latitude' or 'longitude' to get
+    the appropriate index number for the first two of these index numbers.
+
+    Parameters
+    ----------
+    degrees : float or int
+        Degrees of either latitude or longitude.
+    coordinate : string
+        Specify whether degrees arg is latitude or longitude. Must be set to
+        either 'latitude' or 'longitude' or an error will be raised.
+
+    Returns
+    -------
+    index : np.int16
+        The latitude or longitude index number to use when looking up values
+        in the Linke turbidity lookup table.
+    """
+    # Assign inputmin, inputmax, and outputmax based on degree type.
+    if coordinate == 'latitude':
+        inputmin = 90
+        inputmax = -90
+        outputmax = 2160
+    elif coordinate == 'longitude':
+        inputmin = -180
+        inputmax = 180
+        outputmax = 4320
+    else:
+        raise IndexError("coordinate must be 'latitude' or 'longitude'.")
+
+    inputrange = inputmax - inputmin
+    scale = outputmax/inputrange  # number of indices per degree
+    center = inputmin + 1 / scale / 2  # shift to center of index
+    outputmax -= 1  # shift index to zero indexing
+    index = (degrees - center) * scale
+    err = IndexError('Input, %g, is out of range (%g, %g).' %
+                     (degrees, inputmin, inputmax))
+
+    # If the index is still out of bounds after rounding, raise an error.
+    # 0.500001 is used in comparisons instead of 0.5 to allow for a small
+    # margin of error which can occur when dealing with floating point numbers.
+    if index > outputmax:
+        if index - outputmax <= 0.500001:
+            index = outputmax
+        else:
+            raise err
+    elif index < 0:
+        if -index <= 0.500001:
+            index = 0
+        else:
+            raise err
+    # If the index wasn't set to outputmax or 0, round it and cast it as an
+    # integer so it can be used in integer-based indexing.
+    else:
+        index = int(np.around(index))
+
+    return index
+
+
+def haurwitz(apparent_zenith):
+    '''
+    Determine clear sky GHI using the Haurwitz model.
+
+    Implements the Haurwitz clear sky model for global horizontal
+    irradiance (GHI) as presented in [1, 2]. A report on clear
+    sky models found the Haurwitz model to have the best performance
+    in terms of average monthly error among models which require only
+    zenith angle [3].
+
+    Parameters
+    ----------
+    apparent_zenith : Series
         The apparent (refraction corrected) sun zenith angle
         in degrees.
 
     Returns
-    -------        
-    pd.Series
-    The modeled global horizonal irradiance in W/m^2 provided
-    by the Haurwitz clear-sky model.
-
-    Initial implementation of this algorithm by Matthew Reno.
+    -------
+    ghi : DataFrame
+        The modeled global horizonal irradiance in W/m^2 provided
+        by the Haurwitz clear-sky model.
 
     References
     ----------
 
-    [1] B. Haurwitz, "Insolation in Relation to Cloudiness and Cloud 
-     Density," Journal of Meteorology, vol. 2, pp. 154-166, 1945.
+    .. [1] B. Haurwitz, "Insolation in Relation to Cloudiness and Cloud
+       Density," Journal of Meteorology, vol. 2, pp. 154-166, 1945.
 
-    [2] B. Haurwitz, "Insolation in Relation to Cloud Type," Journal of 
-     Meteorology, vol. 3, pp. 123-124, 1946.
+    .. [2] B. Haurwitz, "Insolation in Relation to Cloud Type," Journal of
+       Meteorology, vol. 3, pp. 123-124, 1946.
 
-    [3] M. Reno, C. Hansen, and J. Stein, "Global Horizontal Irradiance Clear
-     Sky Models: Implementation and Analysis", Sandia National
-     Laboratories, SAND2012-2389, 2012.
+    .. [3] M. Reno, C. Hansen, and J. Stein, "Global Horizontal Irradiance
+       Clear Sky Models: Implementation and Analysis", Sandia National
+       Laboratories, SAND2012-2389, 2012.
     '''
 
-    cos_zenith = tools.cosd(ApparentZenith)
+    cos_zenith = tools.cosd(apparent_zenith.values)
+    clearsky_ghi = np.zeros_like(apparent_zenith.values)
+    cos_zen_gte_0 = cos_zenith > 0
+    clearsky_ghi[cos_zen_gte_0] = (1098.0 * cos_zenith[cos_zen_gte_0] *
+                                   np.exp(-0.059/cos_zenith[cos_zen_gte_0]))
 
-    clearsky_GHI = 1098.0 * cos_zenith * np.exp(-0.059/cos_zenith)
+    df_out = pd.DataFrame(index=apparent_zenith.index,
+                          data=clearsky_ghi,
+                          columns=['ghi'])
 
-    clearsky_GHI[clearsky_GHI < 0] = 0
-    
-    df_out = pd.DataFrame({'GHI':clearsky_GHI})
-    
     return df_out
-	    
-    
-
-def _linearly_scale(inputmatrix, inputmin, inputmax, outputmin, outputmax):
-    """ used by linke turbidity lookup function """
-    
-    inputrange = inputmax - inputmin
-    outputrange = outputmax - outputmin
-    OutputMatrix = (inputmatrix - inputmin) * outputrange / inputrange + outputmin
-    return OutputMatrix
 
 
+def simplified_solis(apparent_elevation, aod700=0.1, precipitable_water=1.,
+                     pressure=101325., dni_extra=1364.):
+    """
+    Calculate the clear sky GHI, DNI, and DHI according to the
+    simplified Solis model [1]_.
 
-def disc(GHI, zenith, times, pressure=101325):
-    '''
-    Estimate Direct Normal Irradiance from Global Horizontal Irradiance 
-    using the DISC model.
-
-    The DISC algorithm converts global horizontal irradiance to direct
-    normal irradiance through empirical relationships between the global
-    and direct clearness indices. 
+    Reference [1]_ describes the accuracy of the model as being 15, 20,
+    and 18 W/m^2 for the beam, global, and diffuse components. Reference
+    [2]_ provides comparisons with other clear sky models.
 
     Parameters
     ----------
+    apparent_elevation : numeric
+        The apparent elevation of the sun above the horizon (deg).
 
-    GHI : Series
-        Global horizontal irradiance in W/m^2.
+    aod700 : numeric, default 0.1
+        The aerosol optical depth at 700 nm (unitless).
+        Algorithm derived for values between 0 and 0.45.
 
-    zenith : Series
-        True (not refraction - corrected) solar zenith 
-        angles in decimal degrees. 
+    precipitable_water : numeric, default 1.0
+        The precipitable water of the atmosphere (cm).
+        Algorithm derived for values between 0.2 and 10 cm.
+        Values less than 0.2 will be assumed to be equal to 0.2.
 
-    times : DatetimeIndex
+    pressure : numeric, default 101325.0
+        The atmospheric pressure (Pascals).
+        Algorithm derived for altitudes between sea level and 7000 m,
+        or 101325 and 41000 Pascals.
 
-    pressure : float or Series
-        Site pressure in Pascal.
+    dni_extra : numeric, default 1364.0
+        Extraterrestrial irradiance. The units of ``dni_extra``
+        determine the units of the output.
 
-    Returns   
+    Returns
     -------
-    DataFrame with the following keys:
-        * ``DNI_gen_DISC``: The modeled direct normal irradiance 
-          in W/m^2 provided by the
-          Direct Insolation Simulation Code (DISC) model. 
-        * ``Kt_gen_DISC``: Ratio of global to extraterrestrial 
-          irradiance on a horizontal plane.
-        * ``AM``: Airmass
+    clearsky : DataFrame (if Series input) or OrderedDict of arrays
+        DataFrame/OrderedDict contains the columns/keys
+        ``'dhi', 'dni', 'ghi'``.
 
     References
     ----------
+    .. [1] P. Ineichen, "A broadband simplified version of the
+       Solis clear sky model," Solar Energy, 82, 758-762 (2008).
 
-    [1] Maxwell, E. L., "A Quasi-Physical Model for Converting Hourly 
-    Global Horizontal to Direct Normal Insolation", Technical 
-    Report No. SERI/TR-215-3087, Golden, CO: Solar Energy Research 
-    Institute, 1987.
-
-    [2] J.W. "Fourier series representation of the position of the sun". 
-    Found at:
-    http://www.mail-archive.com/sundial@uni-koeln.de/msg01050.html on
-    January 12, 2012
-
-    See Also 
-    -------- 
-    atmosphere.alt2pres 
-    dirint
-    '''
-
-    logger.debug('clearsky.disc')
-    
-    temp = pd.DataFrame(index=times, columns=['A','B','C'], dtype=float)
-
-    doy = times.dayofyear
-    
-    DayAngle = 2. * np.pi*(doy - 1) / 365
-    
-    re = (1.00011 + 0.034221*np.cos(DayAngle) + 0.00128*np.sin(DayAngle)
-          + 0.000719*np.cos(2.*DayAngle) + 7.7e-05*np.sin(2.*DayAngle) )
-          
-    I0 = re * 1370.
-    I0h = I0 * np.cos(np.radians(zenith))
-    
-    Ztemp = zenith.copy()
-    Ztemp[zenith > 87] = np.NaN
-    
-    AM = 1.0 / ( np.cos(np.radians(Ztemp)) + 0.15*( (93.885 - Ztemp)**(-1.253) ) ) * (pressure / 101325)
-    
-    Kt = GHI / I0h
-    Kt[Kt < 0] = 0
-    Kt[Kt > 2] = np.NaN
-
-    temp.A[Kt > 0.6] = -5.743 + 21.77*(Kt[Kt > 0.6]) - 27.49*(Kt[Kt > 0.6] ** 2) + 11.56*(Kt[Kt > 0.6] ** 3)
-    temp.B[Kt > 0.6] = 41.4 - 118.5*(Kt[Kt > 0.6]) + 66.05*(Kt[Kt > 0.6] ** 2) + 31.9*(Kt[Kt > 0.6] ** 3)
-    temp.C[Kt > 0.6] = -47.01 + 184.2*(Kt[Kt > 0.6]) - 222.0 * Kt[Kt > 0.6] ** 2 + 73.81*(Kt[Kt > 0.6] ** 3)
-    temp.A[Kt <= 0.6] = 0.512 - 1.56*(Kt[Kt <= 0.6]) + 2.286*(Kt[Kt <= 0.6] ** 2) - 2.222*(Kt[Kt <= 0.6] ** 3)
-    temp.B[Kt <= 0.6] = 0.37 + 0.962*(Kt[Kt <= 0.6])
-    temp.C[Kt <= 0.6] = -0.28 + 0.932*(Kt[Kt <= 0.6]) - 2.048*(Kt[Kt <= 0.6] ** 2)
-
-    delKn = temp.A + temp.B * np.exp(temp.C*AM)
-   
-    Knc = 0.866 - 0.122*(AM) + 0.0121*(AM ** 2) - 0.000653*(AM ** 3) + 1.4e-05*(AM ** 4)
-    Kn = Knc - delKn
-    
-    DNI = Kn * I0
-
-    DNI[zenith > 87] = np.NaN
-    DNI[(GHI < 0) | (DNI < 0)] = 0
-
-    DFOut = pd.DataFrame({'DNI_gen_DISC':DNI})
-    DFOut['Kt_gen_DISC'] = Kt
-    DFOut['AM'] = AM
-
-    return DFOut
-    
-
-def dirint(ghi, zenith, times, pressure=101325, use_delta_kt_prime=True, 
-           temp_dew=None):
+    .. [2] P. Ineichen, "Validation of models that estimate the clear
+       sky global and beam solar irradiance," Solar Energy, 132,
+       332-344 (2016).
     """
-    Determine DNI from GHI using the DIRINT modification 
-    of the DISC model.
-    
-    Implements the modified DISC model known as "DIRINT" introduced in [1].
-    DIRINT predicts direct normal irradiance (DNI) from measured global
-    horizontal irradiance (GHI). DIRINT improves upon the DISC model by
-    using time-series GHI data and dew point temperature information. The
-    effectiveness of the DIRINT model improves with each piece of
-    information provided.
+
+    p = pressure
+
+    w = precipitable_water
+
+    # algorithm fails for pw < 0.2
+    w = np.maximum(w, 0.2)
+
+    # this algorithm is reasonably fast already, but it could be made
+    # faster by precalculating the powers of aod700, the log(p/p0), and
+    # the log(w) instead of repeating the calculations as needed in each
+    # function
+
+    i0p = _calc_i0p(dni_extra, w, aod700, p)
+
+    taub = _calc_taub(w, aod700, p)
+    b = _calc_b(w, aod700)
+
+    taug = _calc_taug(w, aod700, p)
+    g = _calc_g(w, aod700)
+
+    taud = _calc_taud(w, aod700, p)
+    d = _calc_d(aod700, p)
+
+    # this prevents the creation of nans at night instead of 0s
+    # it's also friendly to scalar and series inputs
+    sin_elev = np.maximum(1.e-30, np.sin(np.radians(apparent_elevation)))
+
+    dni = i0p * np.exp(-taub/sin_elev**b)
+    ghi = i0p * np.exp(-taug/sin_elev**g) * sin_elev
+    dhi = i0p * np.exp(-taud/sin_elev**d)
+
+    irrads = OrderedDict()
+    irrads['ghi'] = ghi
+    irrads['dni'] = dni
+    irrads['dhi'] = dhi
+
+    if isinstance(dni, pd.Series):
+        irrads = pd.DataFrame.from_dict(irrads)
+
+    return irrads
+
+
+def _calc_i0p(i0, w, aod700, p):
+    """Calculate the "enhanced extraterrestrial irradiance"."""
+    p0 = 101325.
+    io0 = 1.08 * w**0.0051
+    i01 = 0.97 * w**0.032
+    i02 = 0.12 * w**0.56
+    i0p = i0 * (i02*aod700**2 + i01*aod700 + io0 + 0.071*np.log(p/p0))
+
+    return i0p
+
+
+def _calc_taub(w, aod700, p):
+    """Calculate the taub coefficient"""
+    p0 = 101325.
+    tb1 = 1.82 + 0.056*np.log(w) + 0.0071*np.log(w)**2
+    tb0 = 0.33 + 0.045*np.log(w) + 0.0096*np.log(w)**2
+    tbp = 0.0089*w + 0.13
+
+    taub = tb1*aod700 + tb0 + tbp*np.log(p/p0)
+
+    return taub
+
+
+def _calc_b(w, aod700):
+    """Calculate the b coefficient."""
+
+    b1 = 0.00925*aod700**2 + 0.0148*aod700 - 0.0172
+    b0 = -0.7565*aod700**2 + 0.5057*aod700 + 0.4557
+
+    b = b1 * np.log(w) + b0
+
+    return b
+
+
+def _calc_taug(w, aod700, p):
+    """Calculate the taug coefficient"""
+    p0 = 101325.
+    tg1 = 1.24 + 0.047*np.log(w) + 0.0061*np.log(w)**2
+    tg0 = 0.27 + 0.043*np.log(w) + 0.0090*np.log(w)**2
+    tgp = 0.0079*w + 0.1
+    taug = tg1*aod700 + tg0 + tgp*np.log(p/p0)
+
+    return taug
+
+
+def _calc_g(w, aod700):
+    """Calculate the g coefficient."""
+
+    g = -0.0147*np.log(w) - 0.3079*aod700**2 + 0.2846*aod700 + 0.3798
+
+    return g
+
+
+def _calc_taud(w, aod700, p):
+    """Calculate the taud coefficient."""
+
+    # isscalar tests needed to ensure that the arrays will have the
+    # right shape in the tds calculation.
+    # there's probably a better way to do this.
+
+    if np.isscalar(w) and np.isscalar(aod700):
+        w = np.array([w])
+        aod700 = np.array([aod700])
+    elif np.isscalar(w):
+        w = np.full_like(aod700, w)
+    elif np.isscalar(aod700):
+        aod700 = np.full_like(w, aod700)
+
+    # set up nan-tolerant masks
+    aod700_lt_0p05 = np.full_like(aod700, False, dtype='bool')
+    np.less(aod700, 0.05, where=~np.isnan(aod700), out=aod700_lt_0p05)
+    aod700_mask = np.array([aod700_lt_0p05, ~aod700_lt_0p05], dtype=np.int)
+
+    # create tuples of coefficients for
+    # aod700 < 0.05, aod700 >= 0.05
+    td4 = 86*w - 13800, -0.21*w + 11.6
+    td3 = -3.11*w + 79.4, 0.27*w - 20.7
+    td2 = -0.23*w + 74.8, -0.134*w + 15.5
+    td1 = 0.092*w - 8.86, 0.0554*w - 5.71
+    td0 = 0.0042*w + 3.12, 0.0057*w + 2.94
+    tdp = -0.83*(1+aod700)**(-17.2), -0.71*(1+aod700)**(-15.0)
+
+    tds = (np.array([td0, td1, td2, td3, td4, tdp]) * aod700_mask).sum(axis=1)
+
+    p0 = 101325.
+    taud = (tds[4]*aod700**4 + tds[3]*aod700**3 + tds[2]*aod700**2 +
+            tds[1]*aod700 + tds[0] + tds[5]*np.log(p/p0))
+
+    # be polite about matching the output type to the input type(s)
+    if len(taud) == 1:
+        taud = taud[0]
+
+    return taud
+
+
+def _calc_d(aod700, p):
+    """Calculate the d coefficient."""
+
+    p0 = 101325.
+    dp = 1/(18 + 152*aod700)
+    d = -0.337*aod700**2 + 0.63*aod700 + 0.116 + dp*np.log(p/p0)
+
+    return d
+
+
+def detect_clearsky(measured, clearsky, times, window_length,
+                    mean_diff=75, max_diff=75,
+                    lower_line_length=-5, upper_line_length=10,
+                    var_diff=0.005, slope_dev=8, max_iterations=20,
+                    return_components=False):
+    """
+    Detects clear sky times according to the algorithm developed by Reno
+    and Hansen for GHI measurements [1]. The algorithm was designed and
+    validated for analyzing GHI time series only. Users may attempt to
+    apply it to other types of time series data using different filter
+    settings, but should be skeptical of the results.
+
+    The algorithm detects clear sky times by comparing statistics for a
+    measured time series and an expected clearsky time series.
+    Statistics are calculated using a sliding time window (e.g., 10
+    minutes). An iterative algorithm identifies clear periods, uses the
+    identified periods to estimate bias in the clearsky data, scales the
+    clearsky data and repeats.
+
+    Clear times are identified by meeting 5 criteria. Default values for
+    these thresholds are appropriate for 10 minute windows of 1 minute
+    GHI data.
 
     Parameters
-    ----------  
-    ghi : pd.Series
-        Global horizontal irradiance in W/m^2. 
-    
-    zenith : pd.Series
-        True (not refraction-corrected) zenith
-        angles in decimal degrees. If Z is a vector it must be of the
-        same size as all other vector inputs. Z must be >=0 and <=180.
-    
+    ----------
+    measured : array or Series
+        Time series of measured values.
+    clearsky : array or Series
+        Time series of the expected clearsky values.
     times : DatetimeIndex
-        
-    pressure : float or pd.Series
-        The site pressure in Pascal. 
-        Pressure may be measured or an average pressure may be 
-        calculated from site altitude.
-    
-    use_delta_kt_prime : bool
-        Indicates if the user would like to
-        utilize the time-series nature of the GHI measurements. A value of ``False``
-        will not use the time-series improvements, any other numeric value
-        will use time-series improvements. It is recommended that time-series
-        data only be used if the time between measured data points is less
-        than 1.5 hours. If none of the input arguments are
-        vectors, then time-series improvements are not used (because it's not
-        a time-series).
-    
-    temp_dew : None, float, or pd.Series 
-        Surface dew point temperatures, in degrees C. 
-        Values of temp_dew may be numeric or NaN. Any
-        single time period point with a DewPtTemp=NaN does not have dew point
-        improvements applied. If DewPtTemp is not provided, then dew point 
-        improvements are not applied.  
+        Times of measured and clearsky values.
+    window_length : int
+        Length of sliding time window in minutes. Must be greater than 2
+        periods.
+    mean_diff : float, default 75
+        Threshold value for agreement between mean values of measured
+        and clearsky in each interval, see Eq. 6 in [1].
+    max_diff : float, default 75
+        Threshold value for agreement between maxima of measured and
+        clearsky values in each interval, see Eq. 7 in [1].
+    lower_line_length : float, default -5
+        Lower limit of line length criterion from Eq. 8 in [1].
+        Criterion satisfied when
+        lower_line_length < line length difference < upper_line_length
+    upper_line_length : float, default 10
+        Upper limit of line length criterion from Eq. 8 in [1].
+    var_diff : float, default 0.005
+        Threshold value in Hz for the agreement between normalized
+        standard deviations of rate of change in irradiance, see Eqs. 9
+        through 11 in [1].
+    slope_dev : float, default 8
+        Threshold value for agreement between the largest magnitude of
+        change in successive values, see Eqs. 12 through 14 in [1].
+    max_iterations : int, default 20
+        Maximum number of times to apply a different scaling factor to
+        the clearsky and redetermine clear_samples. Must be 1 or larger.
+    return_components : bool, default False
+        Controls if additional output should be returned. See below.
 
     Returns
     -------
-    DNI : pd.Series.
-        The modeled direct normal irradiance in W/m^2 provided by the
-        DIRINT model.
+    clear_samples : array or Series
+        Boolean array or Series of whether or not the given time is
+        clear. Return type is the same as the input type.
+
+    components : OrderedDict, optional
+        Dict of arrays of whether or not the given time window is clear
+        for each condition. Only provided if return_components is True.
+
+    alpha : scalar, optional
+        Scaling factor applied to the clearsky_ghi to obtain the
+        detected clear_samples. Only provided if return_components is
+        True.
 
     References
     ----------
-    [1] Perez, R., P. Ineichen, E. Maxwell, R. Seals and A. Zelenka, (1992).
-    "Dynamic Global-to-Direct Irradiance Conversion Models".  ASHRAE 
-    Transactions-Research Series, pp. 354-369
+    .. [1] Reno, M.J. and C.W. Hansen, "Identification of periods of clear
+       sky irradiance in time series of GHI measurements" Renewable Energy,
+       v90, p. 520-531, 2016.
 
-    [2] Maxwell, E. L., "A Quasi-Physical Model for Converting Hourly 
-    Global Horizontal to Direct Normal Insolation", Technical 
-    Report No. SERI/TR-215-3087, Golden, CO: Solar Energy Research 
-    Institute, 1987.
+    Notes
+    -----
+    Initial implementation in MATLAB by Matthew Reno. Modifications for
+    computational efficiency by Joshua Patrick and Curtis Martin. Ported
+    to Python by Will Holmgren, Tony Lorenzo, and Cliff Hansen.
 
-    DIRINT model requires time series data (ie. one of the inputs must be a
-    vector of length >2.
+    Differences from MATLAB version:
+
+        * no support for unequal times
+        * automatically determines sample_interval
+        * requires a reference clear sky series instead calculating one
+          from a user supplied location and UTCoffset
+        * parameters are controllable via keyword arguments
+        * option to return individual test components and clearsky scaling
+          parameter
     """
-    
-    logger.debug('clearsky.dirint')
-    
-    disc_out = disc(ghi, zenith, times)
-    kt = disc_out['Kt_gen_DISC']
-    
-    # Absolute Airmass, per the DISC model
-    # Note that we calculate the AM pressure correction slightly differently
-    # than Perez. He uses altitude, we use pressure (which we calculate
-    # slightly differently)
-    airmass = (1./(tools.cosd(zenith) + 0.15*((93.885-zenith)**(-1.253))) * 
-               pressure/101325)
-    
-    coeffs = _get_dirint_coeffs()
-    
-    kt_prime = kt / (1.031 * np.exp(-1.4/(0.9+9.4/airmass)) + 0.1)
-    kt_prime[kt_prime > 0.82] = 0.82 # From SRRL code. consider np.NaN
-    kt_prime.fillna(0, inplace=True)
-    logger.debug('kt_prime:\n{}'.format(kt_prime))
-    
-    # wholmgren: 
-    # the use_delta_kt_prime statement is a port of the MATLAB code.
-    # I am confused by the abs() in the delta_kt_prime calculation.
-    # It is not the absolute value of the central difference.
-    if use_delta_kt_prime:
-        delta_kt_prime = 0.5*( (kt_prime - kt_prime.shift(1)).abs()
-                              .add(
-                               (kt_prime - kt_prime.shift(-1)).abs(), 
-                                   fill_value=0))
+
+    # calculate deltas in units of minutes (matches input window_length units)
+    deltas = np.diff(times.values) / np.timedelta64(1, '60s')
+
+    # determine the unique deltas and if we can proceed
+    unique_deltas = np.unique(deltas)
+    if len(unique_deltas) == 1:
+        sample_interval = unique_deltas[0]
     else:
-        delta_kt_prime = pd.Series(-1, index=times)
-    
-    if temp_dew is not None:
-        w = pd.Series(np.exp(0.07 * temp_dew - 0.075), index=times)
+        raise NotImplementedError('algorithm does not yet support unequal '
+                                  'times. consider resampling your data.')
+
+    intervals_per_window = int(window_length / sample_interval)
+
+    # generate matrix of integers for creating windows with indexing
+    from scipy.linalg import hankel
+    H = hankel(np.arange(intervals_per_window),                   # noqa: N806
+               np.arange(intervals_per_window - 1, len(times)))
+
+    # calculate measurement statistics
+    meas_mean = np.mean(measured[H], axis=0)
+    meas_max = np.max(measured[H], axis=0)
+    meas_diff = np.diff(measured[H], n=1, axis=0)
+    meas_slope = np.diff(measured[H], n=1, axis=0) / sample_interval
+    # matlab std function normalizes by N-1, so set ddof=1 here
+    meas_slope_nstd = np.std(meas_slope, axis=0, ddof=1) / meas_mean
+    meas_line_length = np.sum(np.sqrt(
+        meas_diff * meas_diff +
+        sample_interval * sample_interval), axis=0)
+
+    # calculate clear sky statistics
+    clear_mean = np.mean(clearsky[H], axis=0)
+    clear_max = np.max(clearsky[H], axis=0)
+    clear_diff = np.diff(clearsky[H], n=1, axis=0)
+    clear_slope = np.diff(clearsky[H], n=1, axis=0) / sample_interval
+
+    from scipy.optimize import minimize_scalar
+
+    alpha = 1
+    for iteration in range(max_iterations):
+        clear_line_length = np.sum(np.sqrt(
+            alpha * alpha * clear_diff * clear_diff +
+            sample_interval * sample_interval), axis=0)
+
+        line_diff = meas_line_length - clear_line_length
+
+        # evaluate comparison criteria
+        c1 = np.abs(meas_mean - alpha*clear_mean) < mean_diff
+        c2 = np.abs(meas_max - alpha*clear_max) < max_diff
+        c3 = (line_diff > lower_line_length) & (line_diff < upper_line_length)
+        c4 = meas_slope_nstd < var_diff
+        c5 = np.max(np.abs(meas_slope -
+                           alpha * clear_slope), axis=0) < slope_dev
+        c6 = (clear_mean != 0) & ~np.isnan(clear_mean)
+        clear_windows = c1 & c2 & c3 & c4 & c5 & c6
+
+        # create array to return
+        clear_samples = np.full_like(measured, False, dtype='bool')
+        # find the samples contained in any window classified as clear
+        clear_samples[np.unique(H[:, clear_windows])] = True
+
+        # find a new alpha
+        previous_alpha = alpha
+        clear_meas = measured[clear_samples]
+        clear_clear = clearsky[clear_samples]
+
+        def rmse(alpha):
+            return np.sqrt(np.mean((clear_meas - alpha*clear_clear)**2))
+
+        alpha = minimize_scalar(rmse).x
+        if round(alpha*10000) == round(previous_alpha*10000):
+            break
     else:
-        w = pd.Series(-1, index=times)
-    
-    # @wholmgren: the following bin assignments use MATLAB's 1-indexing.
-    # Later, we'll subtract 1 to conform to Python's 0-indexing.
-    
-    # Create kt_prime bins
-    kt_prime_bin = pd.Series(index=times)
-    kt_prime_bin[(kt_prime>=0) & (kt_prime<0.24)] = 1
-    kt_prime_bin[(kt_prime>=0.24) & (kt_prime<0.4)] = 2
-    kt_prime_bin[(kt_prime>=0.4) & (kt_prime<0.56)] = 3
-    kt_prime_bin[(kt_prime>=0.56) & (kt_prime<0.7)] = 4
-    kt_prime_bin[(kt_prime>=0.7) & (kt_prime<0.8)] = 5
-    kt_prime_bin[(kt_prime>=0.8) & (kt_prime<=1)] = 6
-    logger.debug('kt_prime_bin:\n{}'.format(kt_prime_bin))
-    
-    # Create zenith angle bins
-    zenith_bin = pd.Series(index=times)
-    zenith_bin[(zenith>=0) & (zenith<25)] = 1
-    zenith_bin[(zenith>=25) & (zenith<40)] = 2
-    zenith_bin[(zenith>=40) & (zenith<55)] = 3
-    zenith_bin[(zenith>=55) & (zenith<70)] = 4
-    zenith_bin[(zenith>=70) & (zenith<80)] = 5
-    zenith_bin[(zenith>=80)] = 6
-    logger.debug('zenith_bin:\n{}'.format(zenith_bin))
-    
-    # Create the bins for w based on dew point temperature
-    w_bin = pd.Series(index=times)
-    w_bin[(w>=0) & (w<1)] = 1
-    w_bin[(w>=1) & (w<2)] = 2
-    w_bin[(w>=2) & (w<3)] = 3
-    w_bin[(w>=3)] = 4
-    w_bin[(w == -1)] = 5
-    logger.debug('w_bin:\n{}'.format(w_bin))
+        import warnings
+        warnings.warn('failed to converge after %s iterations'
+                      % max_iterations, RuntimeWarning)
 
-    # Create delta_kt_prime binning.
-    delta_kt_prime_bin = pd.Series(index=times)
-    delta_kt_prime_bin[(delta_kt_prime>=0) & (delta_kt_prime<0.015)] = 1
-    delta_kt_prime_bin[(delta_kt_prime>=0.015) & (delta_kt_prime<0.035)] = 2
-    delta_kt_prime_bin[(delta_kt_prime>=0.035) & (delta_kt_prime<0.07)] = 3
-    delta_kt_prime_bin[(delta_kt_prime>=0.07) & (delta_kt_prime<0.15)] = 4
-    delta_kt_prime_bin[(delta_kt_prime>=0.15) & (delta_kt_prime<0.3)] = 5
-    delta_kt_prime_bin[(delta_kt_prime>=0.3) & (delta_kt_prime<=1)] = 6
-    delta_kt_prime_bin[delta_kt_prime == -1] = 7
-    logger.debug('delta_kt_prime_bin:\n{}'.format(delta_kt_prime_bin))
-    
-    # subtract 1 to account for difference between MATLAB-style bin
-    # assignment and Python-style array lookup.
-    dirint_coeffs = coeffs[kt_prime_bin-1, zenith_bin-1,
-                           delta_kt_prime_bin-1, w_bin-1]
-    
-    dni = disc_out['DNI_gen_DISC'] * dirint_coeffs
+    # be polite about returning the same type as was input
+    if isinstance(measured, pd.Series):
+        clear_samples = pd.Series(clear_samples, index=times)
 
-    dni.name = 'DNI_DIRINT'
-    
-    return dni
+    if return_components:
+        components = OrderedDict()
+        components['mean_diff_flag'] = c1
+        components['max_diff_flag'] = c2
+        components['line_length_flag'] = c3
+        components['slope_nstd_flag'] = c4
+        components['slope_max_flag'] = c5
+        components['mean_nan_flag'] = c6
+        components['windows'] = clear_windows
 
-    
-def _get_dirint_coeffs():
+        components['mean_diff'] = np.abs(meas_mean - alpha * clear_mean)
+        components['max_diff'] = np.abs(meas_max - alpha * clear_max)
+        components['line_length'] = meas_line_length - clear_line_length
+        components['slope_nstd'] = meas_slope_nstd
+        components['slope_max'] = (np.max(
+            meas_slope - alpha * clear_slope, axis=0))
+
+        return clear_samples, components, alpha
+    else:
+        return clear_samples
+
+
+def bird(zenith, airmass_relative, aod380, aod500, precipitable_water,
+         ozone=0.3, pressure=101325., dni_extra=1364., asymmetry=0.85,
+         albedo=0.2):
     """
-    A place to stash the dirint coefficients.
-    
+    Bird Simple Clear Sky Broadband Solar Radiation Model
+
+    Based on NREL Excel implementation by Daryl R. Myers [1, 2].
+
+    Bird and Hulstrom define the zenith as the "angle between a line to
+    the sun and the local zenith". There is no distinction in the paper
+    between solar zenith and apparent (or refracted) zenith, but the
+    relative airmass is defined using the Kasten 1966 expression, which
+    requires apparent zenith. Although the formulation for calculated
+    zenith is never explicitly defined in the report, since the purpose
+    was to compare existing clear sky models with "rigorous radiative
+    transfer models" (RTM) it is possible that apparent zenith was
+    obtained as output from the RTM. However, the implentation presented
+    in PVLIB is tested against the NREL Excel implementation by Daryl
+    Myers which uses an analytical expression for solar zenith instead
+    of apparent zenith.
+
+    Parameters
+    ----------
+    zenith : numeric
+        Solar or apparent zenith angle in degrees - see note above
+    airmass_relative : numeric
+        Relative airmass
+    aod380 : numeric
+        Aerosol optical depth [cm] measured at 380[nm]
+    aod500 : numeric
+        Aerosol optical depth [cm] measured at 500[nm]
+    precipitable_water : numeric
+        Precipitable water [cm]
+    ozone : numeric
+        Atmospheric ozone [cm], defaults to 0.3[cm]
+    pressure : numeric
+        Ambient pressure [Pa], defaults to 101325[Pa]
+    dni_extra : numeric
+        Extraterrestrial radiation [W/m^2], defaults to 1364[W/m^2]
+    asymmetry : numeric
+        Asymmetry factor, defaults to 0.85
+    albedo : numeric
+        Albedo, defaults to 0.2
+
     Returns
     -------
-    np.array with shape ``(6, 6, 7, 5)``.
-    Ordering is ``[kt_prime_bin, zenith_bin, delta_kt_prime_bin, w_bin]``
+    clearsky : DataFrame (if Series input) or OrderedDict of arrays
+        DataFrame/OrderedDict contains the columns/keys
+        ``'dhi', 'dni', 'ghi', 'direct_horizontal'`` in  [W/m^2].
+
+    See also
+    --------
+    pvlib.atmosphere.bird_hulstrom80_aod_bb
+    pvlib.atmosphere.relativeairmass
+
+    References
+    ----------
+    .. [1] R. E. Bird and R. L Hulstrom, "A Simplified Clear Sky model for
+       Direct and Diffuse Insolation on Horizontal Surfaces" SERI Technical
+       Report SERI/TR-642-761, Feb 1981. Solar Energy Research Institute,
+       Golden, CO.
+
+    .. [2] Daryl R. Myers, "Solar Radiation: Practical Modeling for Renewable
+       Energy Applications", pp. 46-51 CRC Press (2013)
+
+    .. [3] `NREL Bird Clear Sky Model <http://rredc.nrel.gov/solar/models/
+       clearsky/>`_
+
+    .. [4] `SERI/TR-642-761 <http://rredc.nrel.gov/solar/pubs/pdfs/
+       tr-642-761.pdf>`_
+
+    .. [5] `Error Reports <http://rredc.nrel.gov/solar/models/clearsky/
+       error_reports.html>`_
     """
-    
-    
-    # To allow for maximum copy/paste from the MATLAB 1-indexed code, 
-    # we create and assign values to an oversized array.
-    # Then, we return the [1:, 1:, :, :] slice.
-    
-    coeffs = np.zeros((7,7,7,5))
-    
-    coeffs[1,1,:,:] = [
-        [0.385230, 0.385230, 0.385230, 0.462880, 0.317440],
-        [0.338390, 0.338390, 0.221270, 0.316730, 0.503650],
-        [0.235680, 0.235680, 0.241280, 0.157830, 0.269440],
-        [0.830130, 0.830130, 0.171970, 0.841070, 0.457370],
-        [0.548010, 0.548010, 0.478000, 0.966880, 1.036370],
-        [0.548010, 0.548010, 1.000000, 3.012370, 1.976540],
-        [0.582690, 0.582690, 0.229720, 0.892710, 0.569950 ]]
-
-    coeffs[1,2,:,:] = [
-        [0.131280, 0.131280, 0.385460, 0.511070, 0.127940],
-        [0.223710, 0.223710, 0.193560, 0.304560, 0.193940],
-        [0.229970, 0.229970, 0.275020, 0.312730, 0.244610],
-        [0.090100, 0.184580, 0.260500, 0.687480, 0.579440],
-        [0.131530, 0.131530, 0.370190, 1.380350, 1.052270],
-        [1.116250, 1.116250, 0.928030, 3.525490, 2.316920],
-        [0.090100, 0.237000, 0.300040, 0.812470, 0.664970 ]]
-
-    coeffs[1,3,:,:] = [
-        [0.587510, 0.130000, 0.400000, 0.537210, 0.832490],
-        [0.306210, 0.129830, 0.204460, 0.500000, 0.681640],
-        [0.224020, 0.260620, 0.334080, 0.501040, 0.350470],
-        [0.421540, 0.753970, 0.750660, 3.706840, 0.983790],
-        [0.706680, 0.373530, 1.245670, 0.864860, 1.992630],
-        [4.864400, 0.117390, 0.265180, 0.359180, 3.310820],
-        [0.392080, 0.493290, 0.651560, 1.932780, 0.898730 ]]
-
-    coeffs[1,4,:,:] = [
-        [0.126970, 0.126970, 0.126970, 0.126970, 0.126970],
-        [0.810820, 0.810820, 0.810820, 0.810820, 0.810820],
-        [3.241680, 2.500000, 2.291440, 2.291440, 2.291440],
-        [4.000000, 3.000000, 2.000000, 0.975430, 1.965570],
-        [12.494170, 12.494170, 8.000000, 5.083520, 8.792390],
-        [21.744240, 21.744240, 21.744240, 21.744240, 21.744240],
-        [3.241680, 12.494170, 1.620760, 1.375250, 2.331620 ]]
-
-    coeffs[1,5,:,:] = [
-        [0.126970, 0.126970, 0.126970, 0.126970, 0.126970],
-        [0.810820, 0.810820, 0.810820, 0.810820, 0.810820],
-        [3.241680, 2.500000, 2.291440, 2.291440, 2.291440],
-        [4.000000, 3.000000, 2.000000, 0.975430, 1.965570],
-        [12.494170, 12.494170, 8.000000, 5.083520, 8.792390],
-        [21.744240, 21.744240, 21.744240, 21.744240, 21.744240],
-        [3.241680, 12.494170, 1.620760, 1.375250, 2.331620 ]]
-
-    coeffs[1,6,:,:] = [
-        [0.126970, 0.126970, 0.126970, 0.126970, 0.126970],
-        [0.810820, 0.810820, 0.810820, 0.810820, 0.810820],
-        [3.241680, 2.500000, 2.291440, 2.291440, 2.291440],
-        [4.000000, 3.000000, 2.000000, 0.975430, 1.965570],
-        [12.494170, 12.494170, 8.000000, 5.083520, 8.792390],
-        [21.744240, 21.744240, 21.744240, 21.744240, 21.744240],
-        [3.241680, 12.494170, 1.620760, 1.375250, 2.331620 ]]
-
-    coeffs[2,1,:,:] = [
-        [0.337440, 0.337440, 0.969110, 1.097190, 1.116080],
-        [0.337440, 0.337440, 0.969110, 1.116030, 0.623900],
-        [0.337440, 0.337440, 1.530590, 1.024420, 0.908480],
-        [0.584040, 0.584040, 0.847250, 0.914940, 1.289300],
-        [0.337440, 0.337440, 0.310240, 1.435020, 1.852830],
-        [0.337440, 0.337440, 1.015010, 1.097190, 2.117230],
-        [0.337440, 0.337440, 0.969110, 1.145730, 1.476400 ]]
-
-    coeffs[2,2,:,:] = [
-        [0.300000, 0.300000, 0.700000, 1.100000, 0.796940],
-        [0.219870, 0.219870, 0.526530, 0.809610, 0.649300],
-        [0.386650, 0.386650, 0.119320, 0.576120, 0.685460],
-        [0.746730, 0.399830, 0.470970, 0.986530, 0.785370],
-        [0.575420, 0.936700, 1.649200, 1.495840, 1.335590],
-        [1.319670, 4.002570, 1.276390, 2.644550, 2.518670],
-        [0.665190, 0.678910, 1.012360, 1.199940, 0.986580 ]]
-
-    coeffs[2,3,:,:] = [
-        [0.378870, 0.974060, 0.500000, 0.491880, 0.665290],
-        [0.105210, 0.263470, 0.407040, 0.553460, 0.582590],
-        [0.312900, 0.345240, 1.144180, 0.854790, 0.612280],
-        [0.119070, 0.365120, 0.560520, 0.793720, 0.802600],
-        [0.781610, 0.837390, 1.270420, 1.537980, 1.292950],
-        [1.152290, 1.152290, 1.492080, 1.245370, 2.177100],
-        [0.424660, 0.529550, 0.966910, 1.033460, 0.958730 ]]
-
-    coeffs[2,4,:,:] = [
-        [0.310590, 0.714410, 0.252450, 0.500000, 0.607600],
-        [0.975190, 0.363420, 0.500000, 0.400000, 0.502800],
-        [0.175580, 0.196250, 0.476360, 1.072470, 0.490510],
-        [0.719280, 0.698620, 0.657770, 1.190840, 0.681110],
-        [0.426240, 1.464840, 0.678550, 1.157730, 0.978430],
-        [2.501120, 1.789130, 1.387090, 2.394180, 2.394180],
-        [0.491640, 0.677610, 0.685610, 1.082400, 0.735410 ]]
-
-    coeffs[2,5,:,:] = [
-        [0.597000, 0.500000, 0.300000, 0.310050, 0.413510],
-        [0.314790, 0.336310, 0.400000, 0.400000, 0.442460],
-        [0.166510, 0.460440, 0.552570, 1.000000, 0.461610],
-        [0.401020, 0.559110, 0.403630, 1.016710, 0.671490],
-        [0.400360, 0.750830, 0.842640, 1.802600, 1.023830],
-        [3.315300, 1.510380, 2.443650, 1.638820, 2.133990],
-        [0.530790, 0.745850, 0.693050, 1.458040, 0.804500 ]]
-
-    coeffs[2,6,:,:] = [
-        [0.597000, 0.500000, 0.300000, 0.310050, 0.800920],
-        [0.314790, 0.336310, 0.400000, 0.400000, 0.237040],
-        [0.166510, 0.460440, 0.552570, 1.000000, 0.581990],
-        [0.401020, 0.559110, 0.403630, 1.016710, 0.898570],
-        [0.400360, 0.750830, 0.842640, 1.802600, 3.400390],
-        [3.315300, 1.510380, 2.443650, 1.638820, 2.508780],
-        [0.204340, 1.157740, 2.003080, 2.622080, 1.409380 ]]
-
-    coeffs[3,1,:,:] = [
-        [1.242210, 1.242210, 1.242210, 1.242210, 1.242210],
-        [0.056980, 0.056980, 0.656990, 0.656990, 0.925160],
-        [0.089090, 0.089090, 1.040430, 1.232480, 1.205300],
-        [1.053850, 1.053850, 1.399690, 1.084640, 1.233340],
-        [1.151540, 1.151540, 1.118290, 1.531640, 1.411840],
-        [1.494980, 1.494980, 1.700000, 1.800810, 1.671600],
-        [1.018450, 1.018450, 1.153600, 1.321890, 1.294670 ]]
-
-    coeffs[3,2,:,:] = [
-        [0.700000, 0.700000, 1.023460, 0.700000, 0.945830],
-        [0.886300, 0.886300, 1.333620, 0.800000, 1.066620],
-        [0.902180, 0.902180, 0.954330, 1.126690, 1.097310],
-        [1.095300, 1.075060, 1.176490, 1.139470, 1.096110],
-        [1.201660, 1.201660, 1.438200, 1.256280, 1.198060],
-        [1.525850, 1.525850, 1.869160, 1.985410, 1.911590],
-        [1.288220, 1.082810, 1.286370, 1.166170, 1.119330 ]]
-
-    coeffs[3,3,:,:] = [
-        [0.600000, 1.029910, 0.859890, 0.550000, 0.813600],
-        [0.604450, 1.029910, 0.859890, 0.656700, 0.928840],
-        [0.455850, 0.750580, 0.804930, 0.823000, 0.911000],
-        [0.526580, 0.932310, 0.908620, 0.983520, 0.988090],
-        [1.036110, 1.100690, 0.848380, 1.035270, 1.042380],
-        [1.048440, 1.652720, 0.900000, 2.350410, 1.082950],
-        [0.817410, 0.976160, 0.861300, 0.974780, 1.004580 ]]
-
-    coeffs[3,4,:,:] = [
-        [0.782110, 0.564280, 0.600000, 0.600000, 0.665740],
-        [0.894480, 0.680730, 0.541990, 0.800000, 0.669140],
-        [0.487460, 0.818950, 0.841830, 0.872540, 0.709040],
-        [0.709310, 0.872780, 0.908480, 0.953290, 0.844350],
-        [0.863920, 0.947770, 0.876220, 1.078750, 0.936910],
-        [1.280350, 0.866720, 0.769790, 1.078750, 0.975130],
-        [0.725420, 0.869970, 0.868810, 0.951190, 0.829220 ]]
-
-    coeffs[3,5,:,:] = [
-        [0.791750, 0.654040, 0.483170, 0.409000, 0.597180],
-        [0.566140, 0.948990, 0.971820, 0.653570, 0.718550],
-        [0.648710, 0.637730, 0.870510, 0.860600, 0.694300],
-        [0.637630, 0.767610, 0.925670, 0.990310, 0.847670],
-        [0.736380, 0.946060, 1.117590, 1.029340, 0.947020],
-        [1.180970, 0.850000, 1.050000, 0.950000, 0.888580],
-        [0.700560, 0.801440, 0.961970, 0.906140, 0.823880 ]]
-
-    coeffs[3,6,:,:]  =  [
-        [0.500000, 0.500000, 0.586770, 0.470550, 0.629790],
-        [0.500000, 0.500000, 1.056220, 1.260140, 0.658140],
-        [0.500000, 0.500000, 0.631830, 0.842620, 0.582780],
-        [0.554710, 0.734730, 0.985820, 0.915640, 0.898260],
-        [0.712510, 1.205990, 0.909510, 1.078260, 0.885610],
-        [1.899260, 1.559710, 1.000000, 1.150000, 1.120390],
-        [0.653880, 0.793120, 0.903320, 0.944070, 0.796130 ]]
-
-    coeffs[4,1,:,:] = [
-        [1.000000, 1.000000, 1.050000, 1.170380, 1.178090],
-        [0.960580, 0.960580, 1.059530, 1.179030, 1.131690],
-        [0.871470, 0.871470, 0.995860, 1.141910, 1.114600],
-        [1.201590, 1.201590, 0.993610, 1.109380, 1.126320],
-        [1.065010, 1.065010, 0.828660, 0.939970, 1.017930],
-        [1.065010, 1.065010, 0.623690, 1.119620, 1.132260],
-        [1.071570, 1.071570, 0.958070, 1.114130, 1.127110 ]]
-
-    coeffs[4,2,:,:] = [
-        [0.950000, 0.973390, 0.852520, 1.092200, 1.096590],
-        [0.804120, 0.913870, 0.980990, 1.094580, 1.042420],
-        [0.737540, 0.935970, 0.999940, 1.056490, 1.050060],
-        [1.032980, 1.034540, 0.968460, 1.032080, 1.015780],
-        [0.900000, 0.977210, 0.945960, 1.008840, 0.969960],
-        [0.600000, 0.750000, 0.750000, 0.844710, 0.899100],
-        [0.926800, 0.965030, 0.968520, 1.044910, 1.032310 ]]
-
-    coeffs[4,3,:,:] = [
-        [0.850000, 1.029710, 0.961100, 1.055670, 1.009700],
-        [0.818530, 0.960010, 0.996450, 1.081970, 1.036470],
-        [0.765380, 0.953500, 0.948260, 1.052110, 1.000140],
-        [0.775610, 0.909610, 0.927800, 0.987800, 0.952100],
-        [1.000990, 0.881880, 0.875950, 0.949100, 0.893690],
-        [0.902370, 0.875960, 0.807990, 0.942410, 0.917920],
-        [0.856580, 0.928270, 0.946820, 1.032260, 0.972990 ]]
-
-    coeffs[4,4,:,:] = [
-        [0.750000, 0.857930, 0.983800, 1.056540, 0.980240],
-        [0.750000, 0.987010, 1.013730, 1.133780, 1.038250],
-        [0.800000, 0.947380, 1.012380, 1.091270, 0.999840],
-        [0.800000, 0.914550, 0.908570, 0.999190, 0.915230],
-        [0.778540, 0.800590, 0.799070, 0.902180, 0.851560],
-        [0.680190, 0.317410, 0.507680, 0.388910, 0.646710],
-        [0.794920, 0.912780, 0.960830, 1.057110, 0.947950 ]]
-
-    coeffs[4,5,:,:] = [
-        [0.750000, 0.833890, 0.867530, 1.059890, 0.932840],
-        [0.979700, 0.971470, 0.995510, 1.068490, 1.030150],
-        [0.858850, 0.987920, 1.043220, 1.108700, 1.044900],
-        [0.802400, 0.955110, 0.911660, 1.045070, 0.944470],
-        [0.884890, 0.766210, 0.885390, 0.859070, 0.818190],
-        [0.615680, 0.700000, 0.850000, 0.624620, 0.669300],
-        [0.835570, 0.946150, 0.977090, 1.049350, 0.979970 ]]
-
-    coeffs[4,6,:,:] = [
-        [0.689220, 0.809600, 0.900000, 0.789500, 0.853990],
-        [0.854660, 0.852840, 0.938200, 0.923110, 0.955010],
-        [0.938600, 0.932980, 1.010390, 1.043950, 1.041640],
-        [0.843620, 0.981300, 0.951590, 0.946100, 0.966330],
-        [0.694740, 0.814690, 0.572650, 0.400000, 0.726830],
-        [0.211370, 0.671780, 0.416340, 0.297290, 0.498050],
-        [0.843540, 0.882330, 0.911760, 0.898420, 0.960210 ]]
-
-    coeffs[5,1,:,:] = [
-        [1.054880, 1.075210, 1.068460, 1.153370, 1.069220],
-        [1.000000, 1.062220, 1.013470, 1.088170, 1.046200],
-        [0.885090, 0.993530, 0.942590, 1.054990, 1.012740],
-        [0.920000, 0.950000, 0.978720, 1.020280, 0.984440],
-        [0.850000, 0.908500, 0.839940, 0.985570, 0.962180],
-        [0.800000, 0.800000, 0.810080, 0.950000, 0.961550],
-        [1.038590, 1.063200, 1.034440, 1.112780, 1.037800 ]]
-
-    coeffs[5,2,:,:] = [
-        [1.017610, 1.028360, 1.058960, 1.133180, 1.045620],
-        [0.920000, 0.998970, 1.033590, 1.089030, 1.022060],
-        [0.912370, 0.949930, 0.979770, 1.020420, 0.981770],
-        [0.847160, 0.935300, 0.930540, 0.955050, 0.946560],
-        [0.880260, 0.867110, 0.874130, 0.972650, 0.883420],
-        [0.627150, 0.627150, 0.700000, 0.774070, 0.845130],
-        [0.973700, 1.006240, 1.026190, 1.071960, 1.017240 ]]
-
-    coeffs[5,3,:,:] = [
-        [1.028710, 1.017570, 1.025900, 1.081790, 1.024240],
-        [0.924980, 0.985500, 1.014100, 1.092210, 0.999610],
-        [0.828570, 0.934920, 0.994950, 1.024590, 0.949710],
-        [0.900810, 0.901330, 0.928830, 0.979570, 0.913100],
-        [0.761030, 0.845150, 0.805360, 0.936790, 0.853460],
-        [0.626400, 0.546750, 0.730500, 0.850000, 0.689050],
-        [0.957630, 0.985480, 0.991790, 1.050220, 0.987900 ]]
-
-    coeffs[5,4,:,:] = [
-        [0.992730, 0.993880, 1.017150, 1.059120, 1.017450],
-        [0.975610, 0.987160, 1.026820, 1.075440, 1.007250],
-        [0.871090, 0.933190, 0.974690, 0.979840, 0.952730],
-        [0.828750, 0.868090, 0.834920, 0.905510, 0.871530],
-        [0.781540, 0.782470, 0.767910, 0.764140, 0.795890],
-        [0.743460, 0.693390, 0.514870, 0.630150, 0.715660],
-        [0.934760, 0.957870, 0.959640, 0.972510, 0.981640 ]]
-
-    coeffs[5,5,:,:] = [
-        [0.965840, 0.941240, 0.987100, 1.022540, 1.011160],
-        [0.988630, 0.994770, 0.976590, 0.950000, 1.034840],
-        [0.958200, 1.018080, 0.974480, 0.920000, 0.989870],
-        [0.811720, 0.869090, 0.812020, 0.850000, 0.821050],
-        [0.682030, 0.679480, 0.632450, 0.746580, 0.738550],
-        [0.668290, 0.445860, 0.500000, 0.678920, 0.696510],
-        [0.926940, 0.953350, 0.959050, 0.876210, 0.991490 ]]
-
-    coeffs[5,6,:,:] = [
-        [0.948940, 0.997760, 0.850000, 0.826520, 0.998470],
-        [1.017860, 0.970000, 0.850000, 0.700000, 0.988560],
-        [1.000000, 0.950000, 0.850000, 0.606240, 0.947260],
-        [1.000000, 0.746140, 0.751740, 0.598390, 0.725230],
-        [0.922210, 0.500000, 0.376800, 0.517110, 0.548630],
-        [0.500000, 0.450000, 0.429970, 0.404490, 0.539940],
-        [0.960430, 0.881630, 0.775640, 0.596350, 0.937680 ]]
-
-    coeffs[6,1,:,:] = [
-        [1.030000, 1.040000, 1.000000, 1.000000, 1.049510],
-        [1.050000, 0.990000, 0.990000, 0.950000, 0.996530],
-        [1.050000, 0.990000, 0.990000, 0.820000, 0.971940],
-        [1.050000, 0.790000, 0.880000, 0.820000, 0.951840],
-        [1.000000, 0.530000, 0.440000, 0.710000, 0.928730],
-        [0.540000, 0.470000, 0.500000, 0.550000, 0.773950],
-        [1.038270, 0.920180, 0.910930, 0.821140, 1.034560 ]]
-
-    coeffs[6,2,:,:] = [
-        [1.041020, 0.997520, 0.961600, 1.000000, 1.035780],
-        [0.948030, 0.980000, 0.900000, 0.950360, 0.977460],
-        [0.950000, 0.977250, 0.869270, 0.800000, 0.951680],
-        [0.951870, 0.850000, 0.748770, 0.700000, 0.883850],
-        [0.900000, 0.823190, 0.727450, 0.600000, 0.839870],
-        [0.850000, 0.805020, 0.692310, 0.500000, 0.788410],
-        [1.010090, 0.895270, 0.773030, 0.816280, 1.011680 ]]
-
-    coeffs[6,3,:,:] = [
-        [1.022450, 1.004600, 0.983650, 1.000000, 1.032940],
-        [0.943960, 0.999240, 0.983920, 0.905990, 0.978150],
-        [0.936240, 0.946480, 0.850000, 0.850000, 0.930320],
-        [0.816420, 0.885000, 0.644950, 0.817650, 0.865310],
-        [0.742960, 0.765690, 0.561520, 0.700000, 0.827140],
-        [0.643870, 0.596710, 0.474460, 0.600000, 0.651200],
-        [0.971740, 0.940560, 0.714880, 0.864380, 1.001650 ]]
-
-    coeffs[6,4,:,:] = [
-        [0.995260, 0.977010, 1.000000, 1.000000, 1.035250],
-        [0.939810, 0.975250, 0.939980, 0.950000, 0.982550],
-        [0.876870, 0.879440, 0.850000, 0.900000, 0.917810],
-        [0.873480, 0.873450, 0.751470, 0.850000, 0.863040],
-        [0.761470, 0.702360, 0.638770, 0.750000, 0.783120],
-        [0.734080, 0.650000, 0.600000, 0.650000, 0.715660],
-        [0.942160, 0.919100, 0.770340, 0.731170, 0.995180 ]]
-
-    coeffs[6,5,:,:] = [
-        [0.952560, 0.916780, 0.920000, 0.900000, 1.005880],
-        [0.928620, 0.994420, 0.900000, 0.900000, 0.983720],
-        [0.913070, 0.850000, 0.850000, 0.800000, 0.924280],
-        [0.868090, 0.807170, 0.823550, 0.600000, 0.844520],
-        [0.769570, 0.719870, 0.650000, 0.550000, 0.733500],
-        [0.580250, 0.650000, 0.600000, 0.500000, 0.628850],
-        [0.904770, 0.852650, 0.708370, 0.493730, 0.949030 ]]
-
-    coeffs[6,6,:,:] = [
-        [0.911970, 0.800000, 0.800000, 0.800000, 0.956320],
-        [0.912620, 0.682610, 0.750000, 0.700000, 0.950110],
-        [0.653450, 0.659330, 0.700000, 0.600000, 0.856110],
-        [0.648440, 0.600000, 0.641120, 0.500000, 0.695780],
-        [0.570000, 0.550000, 0.598800, 0.400000, 0.560150],
-        [0.475230, 0.500000, 0.518640, 0.339970, 0.520230],
-        [0.743440, 0.592190, 0.603060, 0.316930, 0.794390 ]]
-        
-    return coeffs[1:,1:,:,:]
-    
+    etr = dni_extra  # extraradiation
+    ze_rad = np.deg2rad(zenith)  # zenith in radians
+    airmass = airmass_relative
+    # Bird clear sky model
+    am_press = atmosphere.get_absolute_airmass(airmass, pressure)
+    t_rayleigh = (
+        np.exp(-0.0903 * am_press ** 0.84 * (
+            1.0 + am_press - am_press ** 1.01
+        ))
+    )
+    am_o3 = ozone*airmass
+    t_ozone = (
+        1.0 - 0.1611 * am_o3 * (1.0 + 139.48 * am_o3) ** -0.3034 -
+        0.002715 * am_o3 / (1.0 + 0.044 * am_o3 + 0.0003 * am_o3 ** 2.0)
+    )
+    t_gases = np.exp(-0.0127 * am_press ** 0.26)
+    am_h2o = airmass * precipitable_water
+    t_water = (
+        1.0 - 2.4959 * am_h2o / (
+            (1.0 + 79.034 * am_h2o) ** 0.6828 + 6.385 * am_h2o
+        )
+    )
+    bird_huldstrom = atmosphere.bird_hulstrom80_aod_bb(aod380, aod500)
+    t_aerosol = np.exp(
+        -(bird_huldstrom ** 0.873) *
+        (1.0 + bird_huldstrom - bird_huldstrom ** 0.7088) * airmass ** 0.9108
+    )
+    taa = 1.0 - 0.1 * (1.0 - airmass + airmass ** 1.06) * (1.0 - t_aerosol)
+    rs = 0.0685 + (1.0 - asymmetry) * (1.0 - t_aerosol / taa)
+    id_ = 0.9662 * etr * t_aerosol * t_water * t_gases * t_ozone * t_rayleigh
+    ze_cos = np.where(zenith < 90, np.cos(ze_rad), 0.0)
+    id_nh = id_ * ze_cos
+    ias = (
+        etr * ze_cos * 0.79 * t_ozone * t_gases * t_water * taa *
+        (0.5 * (1.0 - t_rayleigh) + asymmetry * (1.0 - (t_aerosol / taa))) / (
+            1.0 - airmass + airmass ** 1.02
+        )
+    )
+    gh = (id_nh + ias) / (1.0 - albedo * rs)
+    diffuse_horiz = gh - id_nh
+    # TODO: be DRY, use decorator to wrap methods that need to return either
+    # OrderedDict or DataFrame instead of repeating this boilerplate code
+    irrads = OrderedDict()
+    irrads['direct_horizontal'] = id_nh
+    irrads['ghi'] = gh
+    irrads['dni'] = id_
+    irrads['dhi'] = diffuse_horiz
+    if isinstance(irrads['dni'], pd.Series):
+        irrads = pd.DataFrame.from_dict(irrads)
+    return irrads
